@@ -1,8 +1,8 @@
 import subprocess
 import random
 
-loss_flags = ['fraction_loss', 'naive_loss']
-depths = [2, 3, 4, 5]
+loss_flags = ['naive_loss']
+depths = [2, 3]
 widths = [256, 512, 1024, 2048]
 keep_rates = [1, 0.9, 0.8, 0.7]
 l2_regs = [0, 0, 0, 0.1, 10]

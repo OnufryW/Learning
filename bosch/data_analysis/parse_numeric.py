@@ -4,8 +4,9 @@ import math
 from six.moves import cPickle as pickle
 import csv
 
-BLOB_SIZE = 50000
 FILE = "../data/train_numeric.csv"
+SAMPLE = False
+BLOB_SIZE = 5000 if SAMPLE else 50000
 miss_cols = set()
 
 # Step one - calculate the averages and variances, for normalization
@@ -80,8 +81,13 @@ with open(FILE, "rt") as csvfile:
             outrownum = 0
             rowcount -= data_arr.shape[0]
             # Pickle the data.
-            with open("../data/train_numeric_%d.pickle" % data_blob_count, "wb") as f:
+            filename = "../data/train_numeric_%d.pickle" % data_blob_count
+            if SAMPLE:
+                filename = "../data/train_numeric_99.pickle"
+            with open(filename, "wb") as f:
                 pickle.dump((header_row, data_arr, labels_arr), f)
             data_blob_count += 1
             data_arr = np.empty((min(BLOB_SIZE, rowcount), outcols))
             labels_arr = np.empty(min(BLOB_SIZE, rowcount))
+            if SAMPLE:
+                sys.exit(0)

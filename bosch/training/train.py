@@ -5,6 +5,7 @@ from six.moves import range
 from six.moves import cPickle as pickle
 import argparse
 import datetime
+import os
 
 parser = argparse.ArgumentParser(description='Train the graph')
 parser.add_argument('filename', help='Name of the graph to train')
@@ -39,6 +40,12 @@ def LoadData(savefile):
 with open(args.filename + ".config", "r") as configfile:
   seed = int(configfile.read().strip())
   np.random.seed(seed=seed)
+
+if not os.path.isfile(args.filename + ".steps"):
+  step = 0
+else:
+  with open(args.filename + ".steps", "r") as stepsfile:
+    step = int(stepsfile.read().strip())
 
 print 'Loading input data'
 _, train_data, train_labels = LoadData("../data/train_numeric_%s.pickle" % (
@@ -91,7 +98,6 @@ with session.as_default():
     print "Beginning loss", loss.eval(feed_dict={
         inputt : train_data, labels : train_labels})
 
-    step = 0
     while not NeedToEnd(step):
       offset = step * args.batch_size % (
               train_labels.shape[0] - args.batch_size)
@@ -139,3 +145,5 @@ with session.as_default():
   saver.save(session, args.filename)
 session.close()
 
+with open(args.filename + ".steps", "w") as stepsfile:
+  stepsfile.write(str(step) + "\n")

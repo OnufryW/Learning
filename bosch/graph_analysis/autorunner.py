@@ -3,11 +3,11 @@ import random
 
 loss_flags = ['naive_loss']
 depths = [2, 3]
-widths = [256, 512, 1024, 2048]
-keep_rates = [1, 0.9, 0.8, 0.7]
-l2_regs = [0, 0, 0, 0.1, 10]
-normalizers = [0, 0, 0, 0.1, 10]
-batch_sizes = [400, 1000, 4000, 10000]
+widths = [256, 512, 1024]
+keep_rates = [0.9, 0.8]
+l2_regs = [0.1, 1, 10]
+normalizers = [0.1, 1, 10]
+batch_sizes = [4000, 10000]
 
 loss_flag = random.choice(loss_flags)
 depth = random.choice(depths)
@@ -24,7 +24,7 @@ network = ("python ../training/network.py " +
         "--%s -d %d -w %d -k %f --l2 %f -r %f %s") % (
                 loss_flag, depth, width, keep_rate, l2_reg, normalizer, graph)
 train = ("python ../training/train.py " +
-        "%s 600 -b %d -i %d --log_every_seconds 10 --seconds -v 0") % (
+        "%s 1200 -b %d -i %d --log_every_seconds 10 --seconds -v 0") % (
                 graph, batch_size, inp)
 
 subprocess.call(["bash", "-c", network])

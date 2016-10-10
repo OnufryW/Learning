@@ -35,7 +35,8 @@ saver.restore(session, args.filename)
 
 def LoadData(savefile):
   with open(savefile, "rb") as f:
-    return pickle.load(f)
+    res = pickle.load(f)
+    return res[1], res[2]
 
 with open(args.filename + ".config", "r") as configfile:
   seed = int(configfile.read().strip())
@@ -48,10 +49,10 @@ else:
     step = int(stepsfile.read().strip())
 
 print 'Loading input data'
-_, train_data, train_labels = LoadData("../data/train_numeric_%s.pickle" % (
+train_data, train_labels = LoadData("../data/train_numeric_%s.pickle" % (
     args.input,))
 print 'Loaded training data'
-_, valid_data, valid_labels = LoadData("../data/train_numeric_%s.pickle" % (
+valid_data, valid_labels = LoadData("../data/train_numeric_%s.pickle" % (
     args.validation,))
 print 'Loaded validation data'
 print 'Train data shape:', train_data.shape

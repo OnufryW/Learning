@@ -15,7 +15,9 @@ network = ("python ../training/network.py " +
         "--naive_loss -d %d -w %d -k %f --l2 %f -r %f %s") % (
                 depth, width, keep_rate, l2_reg, normalizer, graph)
 subprocess.call(["bash", "-c", network])
-for i in range(1, 24):
+order = range(1, 24)
+random.shuffle(order)
+for i in order:
   train = ("python ../training/train.py " +
            "%s 600 -b %d -i %d --log_every_seconds 10 --seconds -v 0") % (
                    graph, batch_size, i)

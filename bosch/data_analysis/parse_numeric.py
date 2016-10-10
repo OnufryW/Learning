@@ -3,14 +3,28 @@ import numpy as np
 import math
 from six.moves import cPickle as pickle
 import csv
+import argparse
 
-FILE = "../data/train_numeric.csv"
-SAMPLE = False
-BLOB_SIZE = 5000 if SAMPLE else 50000
+parser = argparse.ArgumentParser(
+    description='Convert the .csv into a set of numpy table pickles')
+parser.add_argument('--train', dest='mode', action='store_const', const='TRAIN',
+        help='Parse train_numeric.csv')
+parser.add_argument('--sample', dest='mode', action='store_const',
+        const='SAMPLE', help='Parse part of train_numeric.csv into a sample')
+parser.add_argument('--test', dest='mode', action='store_const', const='TEST',
+        help='Pare test_numeric.csv')
+        
+args = parser.parse_args()
+
+TRAIN_FILE = '../data/train_numeric.csv'
+DATA_FILE = '../data/test_numeric.csv' if args.mode == 'TEST' else TRAIN_FILE
+BLOB_SIZE = 5000 if args.mode == 'SAMPLE' else 50000
+OUTPUT_FORMAT = "../data/%s_numeric_%%d.pickle" % (
+        'test' if args.mode == 'TEST' else 'train')
 miss_cols = set()
 
 # Step one - calculate the averages and variances, for normalization
-with open(FILE, "rt") as csvfile:
+with open(TRAIN_FILE, "rt") as csvfile:
     reader = csv.reader(csvfile)
     rownum = 0
     for row in reader:
@@ -31,7 +45,8 @@ with open(FILE, "rt") as csvfile:
                     sums[x] += float(row[x])
                     squareSums[x] += float(row[x]) * float(row[x])
         rownum += 1
-    miss_cols.add(cols - 1)  # Skip the "response" row.
+    if args.mode != 'TEST':
+      miss_cols.add(cols - 1)  # Skip the "response" row.
     miss_cols.add(0)  # Skip the ID row.
     for x in range(cols):
         if counts[x]:
@@ -52,7 +67,9 @@ print "Skipping %d columns, leaving %d, got %d rows in total." % (len(miss_cols)
 
 # Step two - parse the data, in ranges.
 rowcount = rownum - 1
-with open(FILE, "rt") as csvfile:
+if args.mode == 'TEST':
+  cols -= 1
+with open(DATA_FILE, "rt") as csvfile:
     reader = csv.reader(csvfile)
     rownum = 0
     outrownum = 0
@@ -72,7 +89,10 @@ with open(FILE, "rt") as csvfile:
                         data_arr[outrownum][colnum] = 0.
                         data_arr[outrownum][colnum + 1] = no[x]
                     colnum += 2
-            labels_arr[outrownum] = float(row[cols-1])
+            if args.mode == 'TEST':
+              labels_arr[outrownum] = float(row[0])
+            else:
+              labels_arr[outrownum] = float(row[cols-1])
             outrownum += 1
         rownum += 1
         if outrownum == data_arr.shape[0]:
@@ -81,13 +101,13 @@ with open(FILE, "rt") as csvfile:
             outrownum = 0
             rowcount -= data_arr.shape[0]
             # Pickle the data.
-            filename = "../data/train_numeric_%d.pickle" % data_blob_count
-            if SAMPLE:
+            filename = OUTPUT_FORMAT % data_blob_count
+            if args.mode == 'SAMPLE':
                 filename = "../data/train_numeric_99.pickle"
             with open(filename, "wb") as f:
                 pickle.dump((header_row, data_arr, labels_arr), f)
             data_blob_count += 1
             data_arr = np.empty((min(BLOB_SIZE, rowcount), outcols))
             labels_arr = np.empty(min(BLOB_SIZE, rowcount))
-            if SAMPLE:
+            if args.mode == 'SAMPLE':
                 sys.exit(0)

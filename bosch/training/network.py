@@ -43,56 +43,69 @@ seed = random.randint(0, 2 ** 30)
 with open(args.filename + ".config", "w") as configfile:
   configfile.write(str(seed) + "\n")
 
+def add_var_summaries(var, name):
+  with tf.name_scope("summaries"):
+    mean = tf.reduce_mean(var)
+    tf.scalar_summary(name + "/mean", mean)
+    with tf.name_scope("stddev"):
+      stddev = tf.sqrt(tf.reduce_mean(tf.square(var - mean)))
+    tf.scalar_summary(name + "/stddev", stddev)
+    tf.scalar_summary(name + "/max", tf.reduce_max(var))
+    tf.scalar_summary(name + "/min", tf.reduce_min(var))
+    tf.histogram_summary(name, var)
+
+def weight_relu(inp, w_shape, b_shape, keep_prob, layer_name):
+  with tf.name_scope("weights"):
+    weights = tf.Variable(tf.truncated_normal(w_shape, stddev=sdev),
+            name="weights")
+    add_var_summaries(weights, layer_name + "/weights")
+  with tf.name_scope("biases"):
+    biases = tf.Variable(tf.truncated_normal(b_shape, stddev=sdev),
+            name="biases")
+    add_var_summaries(biases, layer_name + "/biases")
+  with tf.name_scope("l2_reg"):
+    l2_reg = tf.nn.l2_loss(weights) + tf.nn.l2_loss(biases)
+    add_var_summaries(l2_reg, layer_name + "/l2_reg")
+  with tf.name_scope("operation"):
+    op = tf.matmul(inp, weights, name="multiplied")
+    tf.histogram_summary(layer_name + "/pre-activate", op)
+    neuron = tf.nn.relu(op, name="neuron")
+    tf.histogram_summary(layer_name + "/post-activate", neuron)
+  dropped = tf.nn.dropout(neuron, keep_prob, name="dropped")
+  tf.histogram_summary(layer_name + "/after-dropout", dropped)
+  return (dropped, l2_reg)
+
+
 graph = tf.Graph()
 with graph.as_default():
   # Input data.
   input_dataset = tf.placeholder(tf.float32, name="Input")
+  keep_prob = tf.placeholder(tf.float32, name="KeepProb")
 
-  # Variables.
-  weights = []
-  biases = []
-
-  weights.append(tf.Variable(
-      tf.truncated_normal([input_size, args.width], stddev=sdev), name="weights1"))
-  biases.append(tf.Variable(
-      tf.truncated_normal([args.width], stddev=sdev), name="biases1"))
+  with tf.name_scope("BaseLayer"):
+    (state, l2_reg) = weight_relu(input_dataset, [input_size, args.width],
+        [args.width], keep_prob, "BaseLayer")
   for x in range(args.depth - 2):
-    weights.append(tf.Variable(tf.truncated_normal(
-        [args.width, args.width], stddev=sdev), name="weights"+str(x+2)))
-    biases.append(tf.Variable(tf.truncated_normal(
-        [args.width], stddev=sdev), name="biases"+str(x+2)))
-  weights.append(tf.Variable(
-      tf.truncated_normal([args.width, 1], stddev=sdev), name="weights"+str(args.depth)))
-  biases.append(tf.Variable(
-      tf.truncated_normal([1], stddev=sdev), name="biases"+str(args.depth)))
+    with tf.name_scope("HiddenLayer" + str(x + 1)):
+      state, new_l2 = weight_relu(state, [args.width, args.width],
+          [args.width], keep_prob, "HiddenLayer" + str(x + 1))
+      l2_reg = l2_reg + new_l2
+  state, new_l2 = weight_relu(state, [args.width, 1], [1], keep_prob,
+      "FinalLayer")
+  l2_reg = l2_reg + new_l2
+  
+  logits = tf.reshape(tf.tanh(state) / 2. + 0.5, [-1], name="Logits")
+  add_var_summaries(logits, "Logits")
 
-  l2_reg = (tf.nn.l2_loss(weights[args.depth - 1]) +
-          tf.nn.l2_loss(biases[args.depth - 1]))
-  for x in range(args.depth - 1):
-    l2_reg = l2_reg + tf.nn.l2_loss(weights[x])
-    l2_reg = l2_reg + tf.nn.l2_loss(biases[x])
-  # Let's do dropout on training to prevent overfitting.
-  def construct_network(dropout):
-    suffix = "D" if dropout else ""
-    state = input_dataset
-    for x in range(args.depth-1):
-      operated = tf.matmul(
-              state, weights[x], name="base"+str(x)+suffix) + biases[x]
-      neuron = tf.nn.relu(operated, name="neuron"+str(x)+suffix)
-      if dropout:
-        state = tf.nn.dropout(neuron, args.keep_rate)
-      else:
-        state = neuron
-    return tf.matmul(state, weights[-1], name="final"+suffix) + biases[-1]
-
-  logits = tf.reshape(tf.tanh(construct_network(True)) / 2. + 0.5,
-          [-1], name="Logits")
   tf_train_labels = tf.placeholder(tf.float32, name="TrainLabels")
-
   true_positive = tf_train_labels * logits
+  add_var_summaries(true_positive, "TruePositives")
   true_negative = (1. - tf_train_labels) * (1. - logits)
+  add_var_summaries(true_negative, "TrueNegative")
   false_positive = (1. - tf_train_labels) * logits
+  add_var_summaries(false_positive, "FalsePositives")
   false_negative = tf_train_labels * (1. - logits)
+  add_var_summaries(false_negative, "FalseNegative")
 
   true_positives = tf.reduce_sum(true_positive, name="TruePos")
   true_negatives = tf.reduce_sum(true_negative, name="TrueNeg")
@@ -104,21 +117,29 @@ with graph.as_default():
 
   loss_entry = (false_positives * false_negatives -
           true_positives * true_negatives)
+  tf.scalar_summary("LossNumerator", loss_entry)
   if args.fraction_loss:
     loss_entry = loss_entry * loss_entry / (guess_true * guess_false + 0.1)
   norm_ratio = tf.reshape((guess_false + 0.001 * guess_true) /
           ((guess_true+ 0.001 * guess_false) * 172.),
           [-1], name="NormRatio")
+  tf.scalar_summary(["NormRatio"], norm_ratio)
+  norm_error_term = norm_ratio + (1. / norm_ratio) - 2
+  tf.scalar_summary(["NormRatioEntry"], norm_error_term)
+  tf.scalar_summary(["ScaledNormRatioEntry"],
+          args.ratio_stabilizer * norm_error_term)
   if args.ratio_stabilizer > 0:
     # That's 172 * predicted true / predicted false. We want that to be ~1.
     # The added term minimizes at norm_ratio = 1.
-    loss_entry = loss_entry + args.ratio_stabilizer * (
-        norm_ratio + (1. / norm_ratio) - 2)
+    loss_entry = loss_entry + args.ratio_stabilizer * norm_error_term
 
+  tf.scalar_summary("TotalL2Entry", l2_reg)
+  tf.scalar_summary("ScaledTotalL2Entry", args.l2 * l2_reg)
   if args.l2 > 0:
     loss_entry = loss_entry + args.l2 * l2_reg
 
   loss = tf.reshape(loss_entry, [-1], name="Loss")
+  tf.scalar_summary(["TotalLoss"], loss)
 
   real_loss = tf.reshape(
           (false_positives * false_negatives -
@@ -127,11 +148,14 @@ with graph.as_default():
                         (true_positives + false_negatives) *
                         (true_negatives + false_positives) *
                         (guess_false)),
-          [-1], name="RealLoss")
+          [1], name="RealLoss")
+  print real_loss
+  tf.scalar_summary(["RealLossValue"], real_loss)
 
   optimizer = tf.train.AdamOptimizer().minimize(loss, name="Opt")
+  merged = tf.merge_all_summaries()
+  print merged.name
 
-  clean_logits = tf.reshape(construct_network(False), [-1], name="Pred")
   tf.train.export_meta_graph(filename=(args.filename + ".meta"))
 
 with tf.Session(graph=graph) as session:

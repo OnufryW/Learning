@@ -25,9 +25,17 @@ parser.add_argument('--steps', dest='seconds', action='store_false',
         help='Use step count to determine when to log and terminate')
 parser.add_argument('-v', '--validation', default="0",
         help='Index of validation data file')
+parser.add_argument('-k', '--keep_rate', default=0.9, type=float,
+        help='Keep ratio of dropout layers')
+
 parser.set_defaults(seconds=False)
 
 args = parser.parse_args()
+
+# Try to reuse the data already existing in the logdir.
+logdir = "/tmp/" + args.filename
+if not tf.gfile.Exists(logdir):
+  tf.gfile.MakeDirs(logdir)
 
 session = tf.Session()
 saver = tf.train.import_meta_graph(args.filename + ".meta")
@@ -85,9 +93,12 @@ with session.as_default():
     optimizer = graph.get_operation_by_name("Opt")
     loss = graph.get_tensor_by_name("Loss:0")
     real_loss = graph.get_tensor_by_name("RealLoss:0")
-    pred = graph.get_tensor_by_name("Pred:0")
     inputt = graph.get_tensor_by_name("Input:0")
+    print inputt
+    keep_prob = graph.get_tensor_by_name("KeepProb:0")
+    print keep_prob
     labels = graph.get_tensor_by_name("TrainLabels:0")
+    print labels
     true_pos = graph.get_tensor_by_name("TruePos:0")
     true_neg = graph.get_tensor_by_name("TrueNeg:0")
     false_pos = graph.get_tensor_by_name("FalsPos:0")
@@ -95,30 +106,46 @@ with session.as_default():
     norm_ratio = graph.get_tensor_by_name("NormRatio:0")
     guess_true = graph.get_tensor_by_name("GuessTrue:0")
     guess_false = graph.get_tensor_by_name("GuessFalse:0")
+    merged = graph.get_tensor_by_name("MergeSummary/MergeSummary:0")
 
+    train_writer = tf.train.SummaryWriter(logdir + "/train", session.graph)
+    test_writer = tf.train.SummaryWriter(logdir + "/test", session.graph)
     print "Beginning loss", loss.eval(feed_dict={
-        inputt : train_data, labels : train_labels})
+        inputt : train_data, labels : train_labels, keep_prob : 1.})
 
     while not NeedToEnd(step):
       offset = step * args.batch_size % (
               train_labels.shape[0] - args.batch_size)
       batch_data = train_data[offset:(offset + args.batch_size), :]
       batch_labels = train_labels[offset:(offset + args.batch_size)]
-      feed_dict = { inputt : batch_data, labels : batch_labels }
+      feed_dict = { inputt : batch_data, labels : batch_labels, keep_prob : args.keep_rate }
       _, batch_loss = session.run([optimizer, loss], feed_dict=feed_dict)
       print "Loss at step %d is %.5f" % (step, batch_loss)
 
       if NeedToLog(step):
+        run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+        run_metadata = tf.RunMetadata()
         (t_loss, t_real_loss, t_true_pos, t_true_neg, t_false_pos,
-                t_false_neg, t_norm_ratio, t_g_true, t_g_false) = session.run(
+                t_false_neg, t_norm_ratio, t_g_true, t_g_false, t_m) = session.run(
                         [loss, real_loss, true_pos, true_neg, false_pos,
-                            false_neg, norm_ratio, guess_true, guess_false],
-                        feed_dict={inputt : train_data, labels: train_labels})
+                            false_neg, norm_ratio, guess_true, guess_false,
+                            merged],
+                        feed_dict={inputt : train_data, labels : train_labels,
+                            keep_prob : 1.}, options=run_options,
+                        run_metadata=run_metadata)
+        train_writer.add_run_metadata(run_metadata, 'step%d' % step)
+        train_writer.add_summary(t_m, step)
+
+        run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+        run_metadata = tf.RunMetadata()
         (v_loss, v_real_loss, v_true_pos, v_true_neg, v_false_pos, v_false_neg,
-                v_norm_ratio, v_g_true, v_g_false) = session.run(
+                v_norm_ratio, v_g_true, v_g_false, v_m) = session.run(
                         [loss, real_loss, true_pos, true_neg, false_pos,
-                            false_neg, norm_ratio, guess_true, guess_false],
-                        feed_dict={inputt : valid_data, labels: valid_labels})
+                            false_neg, norm_ratio, guess_true, guess_false, merged],
+                        feed_dict={inputt : valid_data, labels: valid_labels, keep_prob: 1.}, options=run_options, run_metadata=run_metadata)
+        test_writer.add_run_metadata(run_metadata, 'step%d' % step)
+        test_writer.add_summary(v_m, step)
+
         logfile.write("%d %f %f %f %f %f %f %f %f %f %f %f %f\n" % (
             step, t_loss, v_loss, t_real_loss, v_real_loss, t_true_pos,
             t_true_neg, t_false_pos, t_false_neg, v_true_pos, v_true_neg,

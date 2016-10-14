@@ -101,9 +101,8 @@ with graph.as_default():
   loss_entries = (choices_ph - end_val) * discounted_ph
   add_var_summaries(loss_entries, "Loss")
   loss = tf.reduce_sum(loss_entries)
-  optimizer = tf.train.GradientDescentOptimizer(learning_rate=args.learning_rate)
-#  optimizer = tf.train.AdadeltaOptimizer(learning_rate=args.learning_rate,
-#          rho=args.decay_rate)
+  optimizer = tf.train.AdadeltaOptimizer(learning_rate=args.learning_rate,
+          rho=args.decay_rate)
   grads = optimizer.compute_gradients(loss)
   for grad in grads:
     add_var_summaries(grad[0], "GradientOf" + grad[1].name)
@@ -123,7 +122,6 @@ with graph.as_default():
 
   session = tf.Session()
   with session.as_default():
-    # print [x.name for x in graph.get_operations()]
     session.run(init)
     while True:
       if args.render: env.render()
@@ -152,10 +150,9 @@ with graph.as_default():
         episode_number += 1
 
         # Let's export statistics.
-        xx = graph.get_tensor_by_name('FinalLayer/summaries/Max:0')
         run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
         run_metadata = tf.RunMetadata()
-        summaries, _, _, x = session.run([merged, end_val, loss, xx],
+        summaries, _, _ = session.run([merged, end_val, loss],
                 feed_dict = {
                     input_image : np.vstack(inputs[to_take:]),
                     rewards_ph : np.vstack([x for x in rewards[to_take:] if x]),
@@ -163,7 +160,6 @@ with graph.as_default():
                     discounted_ph : discount_rewards(rewards[to_take:])},
                 options=run_options,
                 run_metadata=run_metadata)
-        print x
         log_writer.add_run_metadata(run_metadata, 'Epis. %d' % episode_number)
         log_writer.add_summary(summaries, episode_number)
         to_take = len(rewards)

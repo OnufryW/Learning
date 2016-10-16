@@ -1,12 +1,15 @@
 """ TF rewrite of reinforcement learning agent written by Andrei Karpathy. """
 
 import numpy as np
+import shutil
 from six.moves import range
 from six.moves import cPickle as pickle
 import tensorflow as tf
 import argparse
 import gym
 import matplotlib.pyplot as plt
+import os
+import os.path
 
 parser = argparse.ArgumentParser(description='Train the pong!')
 parser.add_argument('--render', help='Render the game', action='store_true')
@@ -15,12 +18,23 @@ parser.add_argument('--width', help='Width of hidden layer', default=200,
 parser.add_argument('--gamma', help='Reward discount factor over time',
         default=0.99, type=float)
 parser.add_argument('--decay_rate', help='Decay rate of gradient memory',
-        default='0.95', type=float)
+        default='0.99', type=float)
 parser.add_argument('--learning_rate', help='Learning rate', default=0.0001,
         type=float)
-parser.add_argument('--logdir', help='Base directory for logs', default='/tmp')
-parser.add_argument('--batch_size', help='Number of games between learning',
-        default=10, type=int)
+parser.add_argument('--logdir', help='Base directory for logs',
+        default='/tmp/pong')
+parser.add_argument('--learn_interval', default=10, type=int,
+        help='Number of full games (of 21) between learning')
+parser.add_argument('--stat_interval', default=5, type=int,
+        help='Number of full games (of 21) between exporting stats to TB')
+parser.add_argument('--save_interval', default=100, type=int,
+        help='Number of full games (of 21) between checkpointing vars to disk')
+parser.add_argument('--new_start', action='store_true', default=False,
+        help='Delete the old checkpoint and start anew')
+parser.add_argument('--checkpoint', default='pong_checkpoint',
+        help='Checkpoint file path')
+parser.add_argument('--log_device_placement', action='store_true',
+        help='Inform on what device is the operation running')
 args = parser.parse_args()
 
 env = gym.make("Pong-v0")
@@ -28,6 +42,13 @@ env = gym.make("Pong-v0")
 def show(x):
   plt.imshow(x)
   plt.show()
+
+if args.new_start:
+  print 'Removing old checkpoint files'
+  shutil.rmtree(args.logdir, ignore_errors=True)
+  if os.path.exists(args.checkpoint):
+    os.remove(args.checkpoint)
+    os.remove(args.checkpoint + '.episode')
 
 D = 80 * 80  # The size of the preprocessed image.
 def prepro(I):
@@ -101,28 +122,41 @@ with graph.as_default():
   loss_entries = (choices_ph - end_val) * discounted_ph
   add_var_summaries(loss_entries, "Loss")
   loss = tf.reduce_sum(loss_entries)
-  optimizer = tf.train.AdadeltaOptimizer(learning_rate=args.learning_rate,
-          rho=args.decay_rate)
+  optimizer = tf.train.AdamOptimizer()
+#  optimizer = tf.train.AdadeltaOptimizer(learning_rate=args.learning_rate,
+#          rho=args.decay_rate)
+#  optimizer = tf.train.GradientDescentOptimizer(
+#          learning_rate=args.learning_rate)
   grads = optimizer.compute_gradients(loss)
   for grad in grads:
     add_var_summaries(grad[0], "GradientOf" + grad[1].name)
   minimizer = optimizer.apply_gradients(grads)
   merged = tf.merge_all_summaries()
   init = tf.initialize_all_variables()
-  log_writer = tf.train.SummaryWriter(args.logdir + "/pong", graph)
+  log_writer = tf.train.SummaryWriter(args.logdir, graph)
+  saver = tf.train.Saver()
 
+  # We store inputs, choices and rewards in two copies - one to be managed by
+  # the stats exporting system, the other one for learning.
+  inputs, choices, rewards = [[], []], [[], []], [[], []]
   # Now we train.
-  inputs, choices, results, rewards = [], [], [], []
   prev_input = None
   observation = env.reset()
   running_reward = -21.
   reward_sum = 0
-  episode_number = 0
-  to_take = 0
 
-  session = tf.Session()
+  config = tf.ConfigProto(log_device_placement=args.log_device_placement)
+  session = tf.Session(config=config)
   with session.as_default():
-    session.run(init)
+    # Initialize the variables.
+    episode_number = 0
+    if not args.new_start and os.path.exists(args.checkpoint):
+      saver.restore(session, args.checkpoint)
+      with open(args.checkpoint + '.episode', 'rt') as f:
+        episode_number = int(f.read())
+    else:
+      session.run(init)
+
     while True:
       if args.render: env.render()
 
@@ -134,11 +168,13 @@ with graph.as_default():
                             feed_dict={input_image : inp.reshape((1,D))})[0]
 
       action = 2 if np.random.uniform() > up_prob else 3
-      choices.append(action - 2)
-      inputs.append(inp)
       observation, reward, done, info = env.step(action)
+      # Store for later reference:
       reward_sum += reward
-      rewards.append(reward)
+      for ind in (0, 1):
+        choices[ind].append(action - 2)
+        inputs[ind].append(inp)
+        rewards[ind].append(reward)
 
       if done:
         # Bookkeep
@@ -149,29 +185,35 @@ with graph.as_default():
         observation = env.reset()
         episode_number += 1
 
-        # Let's export statistics.
-        run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-        run_metadata = tf.RunMetadata()
-        summaries, _, _ = session.run([merged, end_val, loss],
-                feed_dict = {
-                    input_image : np.vstack(inputs[to_take:]),
-                    rewards_ph : np.vstack([x for x in rewards[to_take:] if x]),
-                    choices_ph : np.vstack(choices[to_take:]),
-                    discounted_ph : discount_rewards(rewards[to_take:])},
-                options=run_options,
-                run_metadata=run_metadata)
-        log_writer.add_run_metadata(run_metadata, 'Epis. %d' % episode_number)
-        log_writer.add_summary(summaries, episode_number)
-        to_take = len(rewards)
+        # Periodically export stats.
+        if (episode_number + 1) % args.stat_interval == 0:
+          run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+          run_metadata = tf.RunMetadata()
+          summaries, _, _ = session.run([merged, end_val, loss],
+                  feed_dict = {
+                      input_image : np.vstack(inputs[1]),
+                      rewards_ph : np.vstack([x for x in rewards[1] if x]),
+                      choices_ph : np.vstack(choices[1]),
+                      discounted_ph : discount_rewards(rewards[1])},
+                  options=run_options,
+                  run_metadata=run_metadata)
+          log_writer.add_run_metadata(run_metadata, 'Epis. %d' % episode_number)
+          log_writer.add_summary(summaries, episode_number)
+          inputs[1], rewards[1], choices[1] = [], [], []
 
         # Learn.
-        if (episode_number + 1) % args.batch_size == 0:
-          feed_dict = {input_image: np.vstack(inputs),
-                       choices_ph : np.vstack(choices),
-                       discounted_ph : discount_rewards(rewards)}
+        if (episode_number + 1) % args.learn_interval == 0:
+          feed_dict = {input_image: np.vstack(inputs[0]),
+                       choices_ph : np.vstack(choices[0]),
+                       discounted_ph : discount_rewards(rewards[0])}
           session.run(minimizer, feed_dict=feed_dict)
-          inputs, choices, results, rewards = [], [], [], []
-          to_take = 0
+          inputs[0], choices[0], rewards[0] = [], [], []
+
+        # Checkpoint variables to disk.
+        if (episode_number + 1) % args.save_interval == 0:
+          saver.save(session, args.checkpoint)
+          with open(args.checkpoint + '.episode', 'wt') as f:
+            f.write(str(episode_number))
 
       if reward:
         print 'ep. %d game done, reward %f' % (episode_number, reward)

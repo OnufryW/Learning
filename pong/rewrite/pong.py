@@ -6,10 +6,11 @@ from six.moves import range
 from six.moves import cPickle as pickle
 import tensorflow as tf
 import argparse
-import gym
 import matplotlib.pyplot as plt
 import os
 import os.path
+import atari_env
+import fake_env
 
 parser = argparse.ArgumentParser(description='Train the pong!')
 parser.add_argument('--render', help='Render the game', action='store_true')
@@ -25,7 +26,7 @@ parser.add_argument('--logdir', help='Base directory for logs',
         default='/tmp/pong')
 parser.add_argument('--learn_interval', default=10, type=int,
         help='Number of full games (of 21) between learning')
-parser.add_argument('--stat_interval', default=5, type=int,
+parser.add_argument('--stat_interval', default=10, type=int,
         help='Number of full games (of 21) between exporting stats to TB')
 parser.add_argument('--save_interval', default=100, type=int,
         help='Number of full games (of 21) between checkpointing vars to disk')
@@ -37,7 +38,8 @@ parser.add_argument('--log_device_placement', action='store_true',
         help='Inform on what device is the operation running')
 args = parser.parse_args()
 
-env = gym.make("Pong-v0")
+env = atari_env.AtariEnv()
+# env = fake_env.FakeEnv(0.0, -2.)
 
 def show(x):
   plt.imshow(x)
@@ -49,17 +51,6 @@ if args.new_start:
   if os.path.exists(args.checkpoint):
     os.remove(args.checkpoint)
     os.remove(args.checkpoint + '.episode')
-
-D = 80 * 80  # The size of the preprocessed image.
-def prepro(I):
-  """ Preprocess the image just as the original code does it. """
-  I = I[35:195]
-  I = I[::2,::2,0]
-  I[I == 144] = 0
-  I[I == 109] = 0
-  I[I != 0] = 1
-  # In the future, likely not ravel, but convo.
-  return I.astype(np.float).ravel()
 
 def add_var_summaries(var, name):
   with tf.name_scope("summaries"):
@@ -78,16 +69,19 @@ def weight_relu(inp, w_shape, layer_name, should_relu):
     w_dev = 1. / np.sqrt(w_shape[0])
     weights = tf.Variable(tf.truncated_normal(w_shape, stddev=w_dev))
     add_var_summaries(weights, layer_name + "/weights")
-    biases = tf.Variable(tf.truncated_normal([w_shape[1]], stddev=0.1))
-    add_var_summaries(biases, layer_name + "/biases")
-    op = tf.add(tf.matmul(inp, weights), biases)
+    l2 = tf.nn.l2_loss(weights) / w_shape[1]  # Normalize so the loss is ~1.
+    tf.scalar_summary(layer_name + "/l2_loss", l2)
+#    biases = tf.Variable(tf.truncated_normal([w_shape[1]], stddev=0.1))
+#    add_var_summaries(biases, layer_name + "/biases")
+#    op = tf.add(tf.matmul(inp, weights), biases)
+    op = tf.matmul(inp, weights)
     if should_relu:
       add_var_summaries(op, layer_name + "/pre-activate")
       neuron = tf.nn.relu(op)
     else:
       neuron = op
     add_var_summaries(neuron, layer_name + "/post-activate")
-    return neuron
+    return (neuron, l2)
 
 def discount_rewards(r):
   discounted_r = np.zeros_like(r)
@@ -105,23 +99,30 @@ graph = tf.Graph()
 with graph.as_default():
   input_image = tf.placeholder(tf.float32, name="Input")
   add_var_summaries(input_image, "Input")
-  hidden = weight_relu(input_image, [D, args.width], "HiddenLayer", True)
-  result = weight_relu(hidden, [args.width, 1], "FinalLayer", False)
+  hidden, l2h = weight_relu(
+          input_image, [env.D, args.width], "HiddenLayer", True)
+  result, l2f = weight_relu(hidden, [args.width, 1], "FinalLayer", False)
   end_val = tf.sigmoid(result)
   add_var_summaries(end_val, "Probabilities")
 
   # We add the placeholders for the sole purpose of exporting them in TB.
-  rewards_ph = tf.placeholder(tf.float32)
+  rewards_ph = tf.placeholder(tf.float32, name="Rewards")
   add_var_summaries(rewards_ph, "Rewards")
-  discounted_ph = tf.placeholder(tf.float32)
+  discounted_ph = tf.placeholder(tf.float32, name="DiscountedRewards")
   add_var_summaries(discounted_ph, "DiscountedRewards")
-  choices_ph = tf.placeholder(tf.float32)
+  choices_ph = tf.placeholder(tf.float32, name="ChoicesMade")
   add_var_summaries(choices_ph, "Choices")
 
   # The real learning part.
-  loss_entries = (choices_ph - end_val) * discounted_ph
+  change_volume = tf.reshape(
+          tf.log(0.001 + 0.999 * tf.abs(choices_ph - end_val)), [-1])
+  loss_entries = change_volume * tf.reshape(discounted_ph, [-1])
   add_var_summaries(loss_entries, "Loss")
   loss = tf.reduce_sum(loss_entries)
+  tf.scalar_summary("Loss/initial_value", loss)
+  final_loss = loss + 50 * (l2h + l2f)
+  tf.scalar_summary("Loss/final_value", final_loss)
+
   optimizer = tf.train.AdamOptimizer()
 #  optimizer = tf.train.AdadeltaOptimizer(learning_rate=args.learning_rate,
 #          rho=args.decay_rate)
@@ -140,9 +141,8 @@ with graph.as_default():
   # the stats exporting system, the other one for learning.
   inputs, choices, rewards = [[], []], [[], []], [[], []]
   # Now we train.
-  prev_input = None
   observation = env.reset()
-  running_reward = -21.
+  running_reward = -env.game_length
   reward_sum = 0
 
   config = tf.ConfigProto(log_device_placement=args.log_device_placement)
@@ -160,15 +160,13 @@ with graph.as_default():
     while True:
       if args.render: env.render()
 
-      cur_input = prepro(observation)
-      inp = cur_input - prev_input if prev_input is not None else np.zeros(D)
-      prev_input = cur_input
+      inp = observation.ravel()
 
       up_prob = session.run([end_val],
-                            feed_dict={input_image : inp.reshape((1,D))})[0]
+                            feed_dict={input_image : inp.reshape((1,env.D))})[0]
 
       action = 2 if np.random.uniform() > up_prob else 3
-      observation, reward, done, info = env.step(action)
+      observation, reward, done = env.step(action)
       # Store for later reference:
       reward_sum += reward
       for ind in (0, 1):
@@ -206,7 +204,8 @@ with graph.as_default():
           feed_dict = {input_image: np.vstack(inputs[0]),
                        choices_ph : np.vstack(choices[0]),
                        discounted_ph : discount_rewards(rewards[0])}
-          session.run(minimizer, feed_dict=feed_dict)
+          print len(inputs[0]), len(choices[0]), len(rewards[0])
+          _ = session.run(minimizer, feed_dict=feed_dict)
           inputs[0], choices[0], rewards[0] = [], [], []
 
         # Checkpoint variables to disk.
